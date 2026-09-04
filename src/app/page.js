@@ -35,6 +35,7 @@ export default function Home() {
     roomCode,
     messages,
     isConnected,
+    log,
     enterRoom,
     send,
     clearMessages,
@@ -170,6 +171,15 @@ export default function Home() {
               Room {roomCode || "…"} · {role === "host" ? "you're first in" : "joining"} ·
               retrying automatically
             </p>
+
+            <div className="rounded-xl border border-neutral-800 bg-black/60 p-3 text-left">
+              <p className="mb-1 text-[10px] uppercase tracking-widest text-neutral-500">
+                Connection log
+              </p>
+              <ul className="flex flex-col gap-0.5 font-mono text-[10px] leading-relaxed text-neutral-400">
+                {log.length === 0 ? <li>starting…</li> : log.map((line, i) => <li key={i}>{line}</li>)}
+              </ul>
+            </div>
           </section>
         ) : match ? (
           <section className="flex flex-1 flex-col justify-center gap-6 text-center">

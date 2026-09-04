@@ -8,6 +8,15 @@ const PEER_ID_PREFIX = "flicksync-";
 const RETRY_MS = 1500;
 const GUEST_TIMEOUT_MS = 6000;
 
+const PEER_OPTS = {
+  config: {
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:global.stun.twilio.com:3478" },
+    ],
+  },
+};
+
 export function generateRoomCode() {
   const bytes = new Uint8Array(ROOM_CODE_LENGTH);
   crypto.getRandomValues(bytes);
@@ -33,6 +42,7 @@ export function usePeerSync() {
   const [roomCode, setRoomCode] = useState("");
   const [messages, setMessages] = useState([]);
   const [lastMessage, setLastMessage] = useState(null);
+  const [log, setLog] = useState([]);
 
   const peerRef = useRef(null);
   const connRef = useRef(null);
@@ -43,6 +53,12 @@ export function usePeerSync() {
 
   const safeSet = useCallback((fn) => {
     if (aliveRef.current) fn();
+  }, []);
+
+  const note = useCallback((text) => {
+    if (!aliveRef.current) return;
+    const stamp = new Date().toLocaleTimeString([], { hour12: false });
+    setLog((prev) => [...prev.slice(-14), `${stamp} ${text}`]);
   }, []);
 
   const teardownPeer = useCallback(() => {
@@ -63,6 +79,7 @@ export function usePeerSync() {
 
       conn.on("open", () => {
         clearTimeout(timerRef.current);
+        note("connected");
         safeSet(() => setStatus("connected"));
       });
 
@@ -77,16 +94,18 @@ export function usePeerSync() {
 
       conn.on("close", () => {
         connRef.current = null;
+        note("connection closed");
         safeSet(() => setStatus("pairing"));
         restart();
       });
 
-      conn.on("error", () => {
+      conn.on("error", (err) => {
         connRef.current = null;
+        note(`conn error: ${err?.type || err?.message || "unknown"}`);
         restart();
       });
     },
-    [safeSet]
+    [note, safeSet]
   );
 
   const pair = useCallback(
@@ -102,6 +121,7 @@ export function usePeerSync() {
 
       const { default: Peer } = await import("peerjs");
       if (stale()) return;
+      note(`room ${code}`);
 
       let claim;
 
@@ -118,16 +138,20 @@ export function usePeerSync() {
         if (stale()) return;
         teardownPeer();
 
-        const peer = new Peer();
+        const peer = new Peer(PEER_OPTS);
         peerRef.current = peer;
 
         peer.on("open", () => {
           if (stale()) return;
+          note("room taken, dialling the other phone");
           safeSet(() => setRole("guest"));
           attachConnection(peer.connect(PEER_ID_PREFIX + code, { reliable: true }), restart);
           // Host may have vanished between the claim and the dial.
           timerRef.current = setTimeout(() => {
-            if (!stale() && !connRef.current?.open) restart();
+            if (!stale() && !connRef.current?.open) {
+              note("dial timed out, retrying");
+              restart();
+            }
           }, GUEST_TIMEOUT_MS);
         });
 
@@ -135,18 +159,22 @@ export function usePeerSync() {
           if (!stale()) peer.reconnect();
         });
 
-        peer.on("error", () => restart());
+        peer.on("error", (err) => {
+          note(`dial error: ${err?.type || err?.message || "unknown"}`);
+          restart();
+        });
       };
 
       claim = () => {
         if (stale()) return;
         teardownPeer();
 
-        const peer = new Peer(PEER_ID_PREFIX + code);
+        const peer = new Peer(PEER_ID_PREFIX + code, PEER_OPTS);
         peerRef.current = peer;
 
         peer.on("open", () => {
           if (stale()) return;
+          note("holding the room, waiting for the other phone");
           safeSet(() => {
             setRole("host");
             setStatus("waiting");
@@ -158,6 +186,7 @@ export function usePeerSync() {
             conn.close();
             return;
           }
+          note("other phone arrived");
           attachConnection(conn, restart);
         });
 
@@ -167,14 +196,18 @@ export function usePeerSync() {
 
         peer.on("error", (err) => {
           if (stale()) return;
-          if (err?.type === "unavailable-id") dial();
-          else restart();
+          const type = err?.type || err?.message || "unknown";
+          if (type === "unavailable-id") dial();
+          else {
+            note(`host error: ${type}`);
+            restart();
+          }
         });
       };
 
       claim();
     },
-    [attachConnection, safeSet, teardownPeer]
+    [attachConnection, note, safeSet, teardownPeer]
   );
 
   const enterRoom = useCallback(
@@ -229,6 +262,7 @@ export function usePeerSync() {
     roomCode,
     messages,
     lastMessage,
+    log,
     isConnected: status === "connected",
     enterRoom,
     send,
