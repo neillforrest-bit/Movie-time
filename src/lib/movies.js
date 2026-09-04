@@ -24,7 +24,7 @@ export const MOVIES = [
 ];
 
 /** Deterministic shuffle so both devices see the same deck order from the room code. */
-export function deckForRoom(roomCode) {
+export function deckForRoom(roomCode, movies = MOVIES) {
   let seed = 2166136261;
   for (const ch of String(roomCode)) {
     seed ^= ch.charCodeAt(0);
@@ -38,7 +38,7 @@ export function deckForRoom(roomCode) {
     return ((seed >>> 0) % 100000) / 100000;
   };
 
-  const deck = [...MOVIES];
+  const deck = [...movies];
   for (let i = deck.length - 1; i > 0; i--) {
     const j = Math.floor(next() * (i + 1));
     [deck[i], deck[j]] = [deck[j], deck[i]];

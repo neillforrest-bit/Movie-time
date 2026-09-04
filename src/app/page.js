@@ -13,11 +13,33 @@ import {
   X,
 } from "lucide-react";
 import usePeerSync from "@/hooks/usePeerSync";
-import { deckForRoom } from "@/lib/movies";
+import { MOVIES, deckForRoom } from "@/lib/movies";
 
 const DEFAULT_ROOM = "MOVIETIME";
 
 const encode = (obj) => JSON.stringify(obj);
+
+/** Renders a movie poster when TMDB supplied one, else falls back to the static emoji/gradient card. */
+function PosterCard({ movie, className, children }) {
+  if (movie.posterUrl) {
+    return (
+      <div
+        className={`relative overflow-hidden rounded-3xl bg-cover bg-center shadow-2xl ${className}`}
+        style={{ backgroundImage: `url(${movie.posterUrl})` }}
+      >
+        <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent" />
+        <div className="relative z-10 flex flex-col gap-3">{children}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`rounded-3xl bg-gradient-to-br ${movie.from} ${movie.to} shadow-2xl ${className}`}>
+      <span className="text-6xl">{movie.emoji}</span>
+      {children}
+    </div>
+  );
+}
 
 function decode(payload) {
   try {
@@ -43,6 +65,22 @@ export default function Home() {
 
   const [copied, setCopied] = useState(false);
   const [roundStart, setRoundStart] = useState(0);
+  const [movies, setMovies] = useState(MOVIES);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/movies")
+      .then((res) => res.json())
+      .then((data) => {
+        if (!cancelled && data.movies?.length) setMovies(data.movies);
+      })
+      .catch(() => {
+        // Static MOVIES fallback already set.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // The bare URL is a single shared room, so both phones opening the same link
   // land together. ?r=CODE is only for running a separate room.
@@ -66,7 +104,10 @@ export default function Home() {
       : origin
     : "";
 
-  const deck = useMemo(() => (roomCode ? deckForRoom(roomCode) : []), [roomCode]);
+  const deck = useMemo(
+    () => (roomCode ? deckForRoom(roomCode, movies) : []),
+    [roomCode, movies]
+  );
 
   const round = useMemo(() => {
     const decoded = messages.map((m) => ({ ...m, body: decode(m.payload) }));
@@ -189,15 +230,12 @@ export default function Home() {
               <p className="text-sm text-neutral-400">You both swiped right on…</p>
             </div>
 
-            <div
-              className={`flex flex-col items-center gap-3 rounded-3xl bg-gradient-to-br ${match.from} ${match.to} p-8 shadow-2xl`}
-            >
-              <span className="text-6xl">{match.emoji}</span>
+            <PosterCard movie={match} className="flex flex-col items-center gap-3 p-8 text-center">
               <h3 className="text-2xl font-bold leading-tight">{match.title}</h3>
               <p className="text-sm text-white/80">
                 {match.year} · {match.genre} · {match.runtime}
               </p>
-            </div>
+            </PosterCard>
 
             <button
               type="button"
@@ -222,17 +260,17 @@ export default function Home() {
 
             {current ? (
               <>
-                <div
+                <PosterCard
                   key={current.id}
-                  className={`flex flex-1 flex-col justify-end gap-3 rounded-3xl bg-gradient-to-br ${current.from} ${current.to} p-6 shadow-2xl`}
+                  movie={current}
+                  className="flex flex-1 flex-col justify-end gap-3 p-6"
                 >
-                  <span className="text-6xl">{current.emoji}</span>
                   <h2 className="text-3xl font-bold leading-tight">{current.title}</h2>
                   <p className="text-sm font-medium text-white/80">
                     {current.year} · {current.genre} · {current.runtime}
                   </p>
                   <p className="text-sm text-white/70">{current.blurb}</p>
-                </div>
+                </PosterCard>
 
                 <div className="grid grid-cols-2 gap-3">
                   <button
