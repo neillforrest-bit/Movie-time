@@ -5,8 +5,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const ROOM_CODE_LENGTH = 6;
 const PEER_ID_PREFIX = "flicksync-";
+const RETRY_MS = 1500;
+const GUEST_TIMEOUT_MS = 6000;
 
-function generateRoomCode() {
+export function generateRoomCode() {
   const bytes = new Uint8Array(ROOM_CODE_LENGTH);
   crypto.getRandomValues(bytes);
   return Array.from(
@@ -16,59 +18,52 @@ function generateRoomCode() {
 }
 
 function normalizeCode(code) {
-  return String(code || "")
-    .trim()
-    .toUpperCase();
+  return String(code || "").trim().toUpperCase();
 }
 
 /**
- * Peer-to-peer sync for two devices. `peerjs` is imported lazily so it never
- * runs during SSR.
+ * Pairs two devices on the same room code. Either device can arrive first: each
+ * tries to claim the room, and whoever loses the claim dials the other. The
+ * loop restarts on any failure or drop, which is what makes it survive iOS
+ * suspending the tab.
  */
 export function usePeerSync() {
-  const [status, setStatus] = useState("idle"); // idle | hosting | connecting | connected | error
-  const [role, setRole] = useState(null); // "host" | "guest"
+  const [status, setStatus] = useState("idle"); // idle | pairing | waiting | connected
+  const [role, setRole] = useState(null);
   const [roomCode, setRoomCode] = useState("");
   const [messages, setMessages] = useState([]);
   const [lastMessage, setLastMessage] = useState(null);
-  const [error, setError] = useState(null);
 
-  const PeerCtorRef = useRef(null);
   const peerRef = useRef(null);
   const connRef = useRef(null);
-  const mountedRef = useRef(false);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    let cancelled = false;
-
-    import("peerjs").then((mod) => {
-      if (!cancelled) PeerCtorRef.current = mod.default ?? mod.Peer;
-    });
-
-    return () => {
-      cancelled = true;
-      mountedRef.current = false;
-      connRef.current?.close();
-      peerRef.current?.destroy();
-      connRef.current = null;
-      peerRef.current = null;
-    };
-  }, []);
+  const timerRef = useRef(null);
+  const codeRef = useRef("");
+  const aliveRef = useRef(false);
+  const runRef = useRef(0);
 
   const safeSet = useCallback((fn) => {
-    if (mountedRef.current) fn();
+    if (aliveRef.current) fn();
+  }, []);
+
+  const teardownPeer = useCallback(() => {
+    clearTimeout(timerRef.current);
+    try {
+      connRef.current?.close();
+    } catch {}
+    try {
+      peerRef.current?.destroy();
+    } catch {}
+    connRef.current = null;
+    peerRef.current = null;
   }, []);
 
   const attachConnection = useCallback(
-    (conn) => {
+    (conn, restart) => {
       connRef.current = conn;
 
       conn.on("open", () => {
-        safeSet(() => {
-          setStatus("connected");
-          setError(null);
-        });
+        clearTimeout(timerRef.current);
+        safeSet(() => setStatus("connected"));
       });
 
       conn.on("data", (data) => {
@@ -82,105 +77,138 @@ export function usePeerSync() {
 
       conn.on("close", () => {
         connRef.current = null;
-        safeSet(() => setStatus("idle"));
+        safeSet(() => setStatus("pairing"));
+        restart();
       });
 
-      conn.on("error", (err) => {
-        safeSet(() => {
-          setError(err?.message || "Connection error");
-          setStatus("error");
-        });
+      conn.on("error", () => {
+        connRef.current = null;
+        restart();
       });
     },
     [safeSet]
   );
 
-  const waitForPeerCtor = useCallback(async () => {
-    if (PeerCtorRef.current) return PeerCtorRef.current;
-    const mod = await import("peerjs");
-    PeerCtorRef.current = mod.default ?? mod.Peer;
-    return PeerCtorRef.current;
-  }, []);
-
-  const host = useCallback(async () => {
-    setError(null);
-    setStatus("hosting");
-
-    const Peer = await waitForPeerCtor();
-    const code = generateRoomCode();
-
-    peerRef.current?.destroy();
-    const peer = new Peer(PEER_ID_PREFIX + code);
-    peerRef.current = peer;
-
-    peer.on("open", () => {
-      safeSet(() => {
-        setRole("host");
-        setRoomCode(code);
-      });
-    });
-
-    peer.on("connection", (conn) => {
-      // Only one partner per room.
-      if (connRef.current) {
-        conn.close();
-        return;
-      }
-      attachConnection(conn);
-    });
-
-    peer.on("error", (err) => {
-      safeSet(() => {
-        setError(err?.message || "Peer error");
-        setStatus("error");
-      });
-    });
-
-    return code;
-  }, [attachConnection, safeSet, waitForPeerCtor]);
-
-  const join = useCallback(
+  const pair = useCallback(
     async (code) => {
-      const normalized = normalizeCode(code);
-      if (!normalized) {
-        setError("Enter a room code.");
-        return;
-      }
+      const myRun = ++runRef.current;
+      const stale = () => !aliveRef.current || runRef.current !== myRun;
 
-      setError(null);
-      setStatus("connecting");
-
-      const Peer = await waitForPeerCtor();
-
-      peerRef.current?.destroy();
-      const peer = new Peer();
-      peerRef.current = peer;
-
-      peer.on("open", () => {
-        safeSet(() => {
-          setRole("guest");
-          setRoomCode(normalized);
-        });
-        attachConnection(peer.connect(PEER_ID_PREFIX + normalized, { reliable: true }));
+      codeRef.current = code;
+      safeSet(() => {
+        setRoomCode(code);
+        setStatus("pairing");
       });
 
-      peer.on("error", (err) => {
-        safeSet(() => {
-          setError(
-            err?.type === "peer-unavailable"
-              ? "No room found with that code."
-              : err?.message || "Peer error"
-          );
-          setStatus("error");
+      const { default: Peer } = await import("peerjs");
+      if (stale()) return;
+
+      let claim;
+
+      const restart = () => {
+        if (stale() || connRef.current?.open) return;
+        teardownPeer();
+        timerRef.current = setTimeout(() => {
+          if (!stale()) claim();
+        }, RETRY_MS);
+      };
+
+      // Loser of the claim dials whoever holds the room id.
+      const dial = () => {
+        if (stale()) return;
+        teardownPeer();
+
+        const peer = new Peer();
+        peerRef.current = peer;
+
+        peer.on("open", () => {
+          if (stale()) return;
+          safeSet(() => setRole("guest"));
+          attachConnection(peer.connect(PEER_ID_PREFIX + code, { reliable: true }), restart);
+          // Host may have vanished between the claim and the dial.
+          timerRef.current = setTimeout(() => {
+            if (!stale() && !connRef.current?.open) restart();
+          }, GUEST_TIMEOUT_MS);
         });
-      });
+
+        peer.on("disconnected", () => {
+          if (!stale()) peer.reconnect();
+        });
+
+        peer.on("error", () => restart());
+      };
+
+      claim = () => {
+        if (stale()) return;
+        teardownPeer();
+
+        const peer = new Peer(PEER_ID_PREFIX + code);
+        peerRef.current = peer;
+
+        peer.on("open", () => {
+          if (stale()) return;
+          safeSet(() => {
+            setRole("host");
+            setStatus("waiting");
+          });
+        });
+
+        peer.on("connection", (conn) => {
+          if (connRef.current?.open) {
+            conn.close();
+            return;
+          }
+          attachConnection(conn, restart);
+        });
+
+        peer.on("disconnected", () => {
+          if (!stale()) peer.reconnect();
+        });
+
+        peer.on("error", (err) => {
+          if (stale()) return;
+          if (err?.type === "unavailable-id") dial();
+          else restart();
+        });
+      };
+
+      claim();
     },
-    [attachConnection, safeSet, waitForPeerCtor]
+    [attachConnection, safeSet, teardownPeer]
   );
+
+  const enterRoom = useCallback(
+    (code) => {
+      const normalized = normalizeCode(code);
+      if (normalized) pair(normalized);
+    },
+    [pair]
+  );
+
+  useEffect(() => {
+    aliveRef.current = true;
+
+    // iOS kills the broker socket when Safari backgrounds; recover on return.
+    const onVisible = () => {
+      if (document.visibilityState !== "visible" || !codeRef.current) return;
+      if (connRef.current?.open) return;
+      const peer = peerRef.current;
+      if (peer && peer.disconnected && !peer.destroyed) peer.reconnect();
+      else pair(codeRef.current);
+    };
+
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      aliveRef.current = false;
+      runRef.current++;
+      document.removeEventListener("visibilitychange", onVisible);
+      teardownPeer();
+    };
+  }, [pair, teardownPeer]);
 
   const send = useCallback((payload) => {
     const conn = connRef.current;
-    if (!conn || !conn.open) return false;
+    if (!conn?.open) return false;
 
     const text = String(payload);
     conn.send(text);
@@ -190,94 +218,7 @@ export function usePeerSync() {
     return true;
   }, []);
 
-  const connectAsGuest = useCallback(
-    async (code) => {
-      const Peer = await waitForPeerCtor();
-      const peer = new Peer();
-      peerRef.current = peer;
-
-      peer.on("open", () => {
-        safeSet(() => {
-          setRole("guest");
-          setRoomCode(code);
-        });
-        attachConnection(peer.connect(PEER_ID_PREFIX + code, { reliable: true }));
-      });
-
-      peer.on("error", (err) => {
-        safeSet(() => {
-          setError(
-            err?.type === "peer-unavailable"
-              ? "No room found with that code."
-              : err?.message || "Peer error"
-          );
-          setStatus("error");
-        });
-      });
-    },
-    [attachConnection, safeSet, waitForPeerCtor]
-  );
-
-  /** Fixed-room mode: first device in becomes host, the second auto-joins it. */
-  const enterRoom = useCallback(
-    async (code) => {
-      const normalized = normalizeCode(code);
-      if (!normalized) return;
-
-      setError(null);
-      setStatus("connecting");
-
-      const Peer = await waitForPeerCtor();
-      peerRef.current?.destroy();
-
-      const peer = new Peer(PEER_ID_PREFIX + normalized);
-      peerRef.current = peer;
-
-      peer.on("open", () => {
-        safeSet(() => {
-          setRole("host");
-          setRoomCode(normalized);
-          setStatus("hosting");
-        });
-      });
-
-      peer.on("connection", (conn) => {
-        if (connRef.current) {
-          conn.close();
-          return;
-        }
-        attachConnection(conn);
-      });
-
-      peer.on("error", (err) => {
-        if (err?.type === "unavailable-id") {
-          peer.destroy();
-          connectAsGuest(normalized);
-          return;
-        }
-        safeSet(() => {
-          setError(err?.message || "Peer error");
-          setStatus("error");
-        });
-      });
-    },
-    [attachConnection, connectAsGuest, safeSet, waitForPeerCtor]
-  );
-
   const clearMessages = useCallback(() => {
-
-    setMessages([]);
-    setLastMessage(null);
-  }, []);
-
-  const disconnect = useCallback(() => {
-    connRef.current?.close();
-    peerRef.current?.destroy();
-    connRef.current = null;
-    peerRef.current = null;
-    setStatus("idle");
-    setRole(null);
-    setRoomCode("");
     setMessages([]);
     setLastMessage(null);
   }, []);
@@ -288,14 +229,10 @@ export function usePeerSync() {
     roomCode,
     messages,
     lastMessage,
-    error,
     isConnected: status === "connected",
-    host,
-    join,
     enterRoom,
     send,
     clearMessages,
-    disconnect,
   };
 }
 
