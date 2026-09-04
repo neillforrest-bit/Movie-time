@@ -12,8 +12,10 @@ import {
   Wifi,
   X,
 } from "lucide-react";
-import usePeerSync, { generateRoomCode } from "@/hooks/usePeerSync";
+import usePeerSync from "@/hooks/usePeerSync";
 import { deckForRoom } from "@/lib/movies";
+
+const DEFAULT_ROOM = "MOVIETIME";
 
 const encode = (obj) => JSON.stringify(obj);
 
@@ -41,20 +43,15 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   const [roundStart, setRoundStart] = useState(0);
 
-  // Landing without a room creates one and puts it in the URL, so the address
-  // bar is always the shareable invite.
+  // The bare URL is a single shared room, so both phones opening the same link
+  // land together. ?r=CODE is only for running a separate room.
   const startedRef = useRef(false);
   useEffect(() => {
     if (startedRef.current) return;
     startedRef.current = true;
 
-    const params = new URLSearchParams(window.location.search);
-    let code = params.get("r")?.toUpperCase();
-    if (!code) {
-      code = generateRoomCode();
-      window.history.replaceState(null, "", `?r=${code}`);
-    }
-    enterRoom(code);
+    const code = new URLSearchParams(window.location.search).get("r")?.toUpperCase();
+    enterRoom(code || DEFAULT_ROOM);
   }, [enterRoom]);
 
   const origin = useSyncExternalStore(
@@ -62,7 +59,11 @@ export default function Home() {
     () => window.location.origin,
     () => ""
   );
-  const inviteUrl = origin && roomCode ? `${origin}/?r=${roomCode}` : "";
+  const inviteUrl = origin
+    ? roomCode && roomCode !== DEFAULT_ROOM
+      ? `${origin}/?r=${roomCode}`
+      : origin
+    : "";
 
   const deck = useMemo(() => (roomCode ? deckForRoom(roomCode) : []), [roomCode]);
 
@@ -138,7 +139,8 @@ export default function Home() {
               <Loader2 className="size-8 animate-spin text-fuchsia-400" />
               <p className="text-lg font-semibold">Waiting for the other phone</p>
               <p className="text-sm text-neutral-400">
-                Send this link. The moment it&apos;s open on both phones, swiping starts.
+                You&apos;re both in the same room automatically. As soon as this page
+                is open on both phones at once, the cards appear.
               </p>
             </div>
 
@@ -166,7 +168,7 @@ export default function Home() {
 
             <p className="text-xs text-neutral-600">
               Room {roomCode || "…"} · {role === "host" ? "you're first in" : "joining"} ·
-              keeps retrying by itself
+              retrying automatically
             </p>
           </section>
         ) : match ? (
