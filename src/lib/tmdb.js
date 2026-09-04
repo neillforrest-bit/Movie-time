@@ -1,44 +1,24 @@
-const TMDB_BASE = "https://api.themoviedb.org/3";
-const IMAGE_BASE = "https://image.tmdb.org/t/p/w500";
+export async function fetchTenMovies() {
+  const apiKey = process.env.TMDB_API_KEY;
+  if (!apiKey) throw new Error("TMDB_API_KEY is missing from environment.");
 
-async function tmdbFetch(path, params = {}) {
-  const url = new URL(TMDB_BASE + path);
-  url.searchParams.set("api_key", process.env.TMDB_API_KEY);
-  url.searchParams.set("language", "en-US");
-  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  // Fetch acclaimed, popular movies
+  const randomPage = Math.floor(Math.random() * 5) + 1;
+  const url = `https://api.themoviedb.org/3/discover/movie?api_key=${apiKey}&language=en-US&sort_by=popularity.desc&include_adult=false&vote_average.gte=7.2&vote_count.gte=800&page=${randomPage}`;
 
-  const res = await fetch(url, { next: { revalidate: 3600 } });
-  if (!res.ok) throw new Error(`TMDB request failed: ${res.status}`);
-  return res.json();
-}
+  const res = await fetch(url, { next: { revalidate: 0 } });
+  if (!res.ok) throw new Error("Failed to fetch from TMDB");
 
-function formatRuntime(minutes) {
-  if (!minutes) return "";
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return h ? `${h}h ${m}m` : `${m}m`;
-}
-
-/** Fetches the current popular-movies page and enriches each entry with runtime + genre name. */
-export async function getPopularMovies(page = 1) {
-  const [{ results }, { genres }] = await Promise.all([
-    tmdbFetch("/movie/popular", { page }),
-    tmdbFetch("/genre/movie/list"),
-  ]);
-  const genreById = new Map(genres.map((g) => [g.id, g.name]));
-
-  const details = await Promise.all(
-    results.map((movie) => tmdbFetch(`/movie/${movie.id}`).catch(() => null))
-  );
-
-  return results.map((movie, i) => ({
-    id: `tmdb-${movie.id}`,
-    title: movie.title,
-    year: movie.release_date ? Number(movie.release_date.slice(0, 4)) : null,
-    genre: genreById.get(movie.genre_ids[0]) || "Movie",
-    runtime: formatRuntime(details[i]?.runtime),
-    blurb: movie.overview?.length > 140 ? `${movie.overview.slice(0, 137)}...` : movie.overview,
-    posterUrl: movie.poster_path ? IMAGE_BASE + movie.poster_path : null,
-    voteAverage: movie.vote_average,
+  const data = await res.json();
+  
+  // Shuffle and take exactly 10
+  const shuffled = (data.results || []).sort(() => 0.5 - Math.random());
+  return shuffled.slice(0, 10).map((m) => ({
+    id: m.id,
+    title: m.title,
+    overview: m.overview,
+    poster_path: m.poster_path ? `https://image.tmdb.org/t/p/w500${m.poster_path}` : null,
+    rating: Math.round(m.vote_average * 10),
+    release_year: m.release_date ? m.release_date.split('-')[0] : 'N/A'
   }));
 }

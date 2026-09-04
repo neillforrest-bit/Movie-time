@@ -1,326 +1,227 @@
-"use client";
-
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import {
-  Check,
-  Film,
-  Heart,
-  Loader2,
-  PartyPopper,
-  RotateCcw,
-  Share2,
-  Wifi,
-  X,
-} from "lucide-react";
-import usePeerSync from "@/hooks/usePeerSync";
-import { MOVIES, deckForRoom } from "@/lib/movies";
-
-const DEFAULT_ROOM = "MOVIETIME";
-
-const encode = (obj) => JSON.stringify(obj);
-
-/** Renders a movie poster when TMDB supplied one, else falls back to the static emoji/gradient card. */
-function PosterCard({ movie, className, children }) {
-  if (movie.posterUrl) {
-    return (
-      <div
-        className={`relative overflow-hidden rounded-3xl bg-cover bg-center shadow-2xl ${className}`}
-        style={{ backgroundImage: `url(${movie.posterUrl})` }}
-      >
-        <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent" />
-        <div className="relative z-10 flex flex-col gap-3">{children}</div>
-      </div>
-    );
-  }
-
-  return (
-    <div className={`rounded-3xl bg-gradient-to-br ${movie.from} ${movie.to} shadow-2xl ${className}`}>
-      <span className="text-6xl">{movie.emoji}</span>
-      {children}
-    </div>
-  );
-}
-
-function decode(payload) {
-  try {
-    const parsed = JSON.parse(payload);
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
-  }
-}
+'use client';
+import { useState, useEffect } from 'react';
 
 export default function Home() {
-  const {
-    status,
-    role,
-    roomCode,
-    messages,
-    isConnected,
-    log,
-    enterRoom,
-    send,
-    clearMessages,
-  } = usePeerSync();
+  const [room, setRoom] = useState(null);
+  const [role, setRole] = useState(null);
+  const [inputCode, setInputCode] = useState('');
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [submitted, setSubmitted] = useState(false);
+  const [loading, setLoading] = useState(false);
 
-  const [copied, setCopied] = useState(false);
-  const [roundStart, setRoundStart] = useState(0);
-  const [movies, setMovies] = useState(MOVIES);
-
+  // Poll room state every 2 seconds
   useEffect(() => {
-    let cancelled = false;
-    fetch("/api/movies")
-      .then((res) => res.json())
-      .then((data) => {
-        if (!cancelled && data.movies?.length) setMovies(data.movies);
-      })
-      .catch(() => {
-        // Static MOVIES fallback already set.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // The bare URL is a single shared room, so both phones opening the same link
-  // land together. ?r=CODE is only for running a separate room.
-  const startedRef = useRef(false);
-  useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
-
-    const code = new URLSearchParams(window.location.search).get("r")?.toUpperCase();
-    enterRoom(code || DEFAULT_ROOM);
-  }, [enterRoom]);
-
-  const origin = useSyncExternalStore(
-    () => () => {},
-    () => window.location.origin,
-    () => ""
-  );
-  const inviteUrl = origin
-    ? roomCode && roomCode !== DEFAULT_ROOM
-      ? `${origin}/?r=${roomCode}`
-      : origin
-    : "";
-
-  const deck = useMemo(
-    () => (roomCode ? deckForRoom(roomCode, movies) : []),
-    [roomCode, movies]
-  );
-
-  const round = useMemo(() => {
-    const decoded = messages.map((m) => ({ ...m, body: decode(m.payload) }));
-    // A reset from the other device restarts the round here too.
-    const start = decoded.reduce(
-      (acc, m) => (m.from === "peer" && m.body?.t === "reset" ? Math.max(acc, m.at + 1) : acc),
-      roundStart
-    );
-    return decoded.filter((m) => m.at >= start);
-  }, [messages, roundStart]);
-
-  const myVotes = round.filter((m) => m.from === "me" && m.body?.t === "vote");
-  const theirVotes = round.filter((m) => m.from === "peer" && m.body?.t === "vote");
-  const myLikes = new Set(myVotes.filter((m) => m.body.like).map((m) => m.body.id));
-  const theirLikes = new Set(theirVotes.filter((m) => m.body.like).map((m) => m.body.id));
-
-  const match = deck.find((movie) => myLikes.has(movie.id) && theirLikes.has(movie.id));
-  const current = deck[myVotes.length];
-
-  const vote = (like) => {
-    if (current) send(encode({ t: "vote", id: current.id, like }));
-  };
-
-  const startOver = () => {
-    const at = Date.now();
-    send(encode({ t: "reset" }));
-    clearMessages();
-    setRoundStart(at + 1);
-  };
-
-  const shareInvite = useCallback(async () => {
-    if (!inviteUrl) return;
-    if (navigator.share) {
-      try {
-        await navigator.share({ title: "FlickSync", text: "Let's pick a film", url: inviteUrl });
-        return;
-      } catch {
-        // Sheet dismissed; fall back to the clipboard.
+    if (!room?.code) return;
+    const interval = setInterval(async () => {
+      const res = await fetch(`/api/room?code=${room.code}`);
+      if (res.ok) {
+        const data = await res.json();
+        setRoom(data);
+        if (data.phase !== room.phase) {
+          setSelectedIds([]);
+          setSubmitted(false);
+        }
       }
-    }
-    await navigator.clipboard.writeText(inviteUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }, [inviteUrl]);
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [room?.code, room?.phase]);
 
-  return (
-    <main className="flex min-h-svh flex-col bg-neutral-950 text-neutral-100">
-      <div className="mx-auto flex w-full max-w-md flex-1 flex-col gap-5 px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-[max(1.5rem,env(safe-area-inset-top))]">
-        <header className="flex items-center justify-between">
-          <span className="flex items-center gap-2 text-lg font-bold tracking-tight">
-            <span className="flex size-9 items-center justify-center rounded-xl bg-gradient-to-br from-fuchsia-500 to-rose-500">
-              <Film className="size-5" />
-            </span>
-            FlickSync
-          </span>
-          <span
-            className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium ${
-              isConnected
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                : "border-neutral-700 bg-neutral-900 text-neutral-400"
-            }`}
+  const createRoom = async () => {
+    setLoading(true);
+    const res = await fetch('/api/room', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'CREATE' })
+    });
+    const data = await res.json();
+    setRoom(data);
+    setRole('host');
+    setLoading(false);
+  };
+
+  const joinRoom = async () => {
+    if (!inputCode) return;
+    setLoading(true);
+    const res = await fetch(`/api/room?code=${inputCode}`);
+    if (res.ok) {
+      const data = await res.json();
+      setRoom(data);
+      setRole('guest');
+    } else {
+      alert('Room not found');
+    }
+    setLoading(false);
+  };
+
+  const toggleSelect = (id, max) => {
+    if (submitted) return;
+    if (selectedIds.includes(id)) {
+      setSelectedIds(selectedIds.filter(x => x !== id));
+    } else if (selectedIds.length < max) {
+      setSelectedIds([...selectedIds, id]);
+    }
+  };
+
+  const submitAction = async (actionType) => {
+    setSubmitted(true);
+    await fetch('/api/room', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: actionType,
+        code: room.code,
+        role: role,
+        selections: selectedIds
+      })
+    });
+  };
+
+  // 1. Lobby View
+  if (!room) {
+    return (
+      <main className="min-h-screen bg-neutral-950 text-white flex flex-col items-center justify-center p-6">
+        <h1 className="text-3xl font-extrabold mb-8 tracking-tight">FlickSync 🎬</h1>
+        <div className="w-full max-w-xs space-y-4">
+          <button 
+            onClick={createRoom} 
+            disabled={loading}
+            className="w-full py-4 bg-emerald-500 hover:bg-emerald-600 rounded-xl font-bold transition text-black"
           >
-            {isConnected ? <Wifi className="size-3.5" /> : <Loader2 className="size-3.5 animate-spin" />}
-            {isConnected ? "Synced" : "Linking…"}
-          </span>
+            {loading ? 'Starting...' : 'Create Room'}
+          </button>
+          <div className="flex gap-2">
+            <input 
+              type="text" 
+              placeholder="Room Code" 
+              value={inputCode} 
+              onChange={e => setInputCode(e.target.value.toUpperCase())}
+              className="w-2/3 p-3 bg-neutral-900 border border-neutral-800 rounded-xl text-center font-mono uppercase"
+            />
+            <button 
+              onClick={joinRoom}
+              disabled={loading}
+              className="w-1/3 bg-neutral-800 hover:bg-neutral-700 rounded-xl font-bold transition"
+            >
+              Join
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  // 2. Phase 0: The Purge (Veto 3)
+  if (room.phase === 0) {
+    return (
+      <main className="min-h-screen bg-neutral-950 text-white p-4 max-w-md mx-auto pb-24">
+        <header className="text-center mb-6 pt-4">
+          <span className="text-xs uppercase tracking-widest text-neutral-400 font-mono">Room: {room.code}</span>
+          <h2 className="text-2xl font-bold mt-1">Phase 1: The Purge</h2>
+          <p className="text-sm text-neutral-400 mt-1">Secretly tap 3 movies you refuse to watch.</p>
         </header>
 
-        {!isConnected ? (
-          <section className="flex flex-1 flex-col justify-center gap-5 text-center">
-            <div className="flex flex-col items-center gap-2">
-              <Loader2 className="size-8 animate-spin text-fuchsia-400" />
-              <p className="text-lg font-semibold">Waiting for the other phone</p>
-              <p className="text-sm text-neutral-400">
-                You&apos;re both in the same room automatically. As soon as this page
-                is open on both phones at once, the cards appear.
-              </p>
-            </div>
-
-            <button
-              type="button"
-              onClick={shareInvite}
-              className="flex w-full items-center justify-center gap-2 rounded-2xl bg-white px-4 py-4 text-base font-semibold text-neutral-900 active:scale-[0.98]"
-            >
-              {copied ? (
-                <>
-                  <Check className="size-5" />
-                  Link copied
-                </>
-              ) : (
-                <>
-                  <Share2 className="size-5" />
-                  Send the link
-                </>
-              )}
-            </button>
-
-            <p className="break-all rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2.5 text-[11px] text-neutral-400">
-              {inviteUrl || "Setting up…"}
-            </p>
-
-            <p className="text-xs text-neutral-600">
-              Room {roomCode || "…"} · {role === "host" ? "you're first in" : "joining"} ·
-              retrying automatically
-            </p>
-
-            <div className="rounded-xl border border-neutral-800 bg-black/60 p-3 text-left">
-              <p className="mb-1 text-[10px] uppercase tracking-widest text-neutral-500">
-                Connection log
-              </p>
-              <ul className="flex flex-col gap-0.5 font-mono text-[10px] leading-relaxed text-neutral-400">
-                {log.length === 0 ? <li>starting…</li> : log.map((line, i) => <li key={i}>{line}</li>)}
-              </ul>
-            </div>
-          </section>
-        ) : match ? (
-          <section className="flex flex-1 flex-col justify-center gap-6 text-center">
-            <div className="flex flex-col items-center gap-2">
-              <PartyPopper className="size-10 text-fuchsia-400" />
-              <h2 className="text-2xl font-bold">It&apos;s a match</h2>
-              <p className="text-sm text-neutral-400">You both swiped right on…</p>
-            </div>
-
-            <PosterCard movie={match} className="flex flex-col items-center gap-3 p-8 text-center">
-              <h3 className="text-2xl font-bold leading-tight">{match.title}</h3>
-              <p className="text-sm text-white/80">
-                {match.year} · {match.genre} · {match.runtime}
-              </p>
-            </PosterCard>
-
-            <button
-              type="button"
-              onClick={startOver}
-              className="flex items-center justify-center gap-2 rounded-2xl border border-neutral-700 bg-neutral-800 px-4 py-3.5 font-semibold active:scale-[0.98]"
-            >
-              <RotateCcw className="size-4" />
-              Not feeling it — go again
-            </button>
-          </section>
-        ) : (
-          <section className="flex flex-1 flex-col gap-4">
-            <div className="flex items-center justify-between text-xs text-neutral-500">
-              <span>
-                Card {Math.min(myVotes.length + 1, deck.length)} of {deck.length}
-              </span>
-              <span className="flex items-center gap-1.5">
-                <Heart className="size-3.5 text-fuchsia-400" />
-                They&apos;ve done {theirVotes.length}
-              </span>
-            </div>
-
-            {current ? (
-              <>
-                <PosterCard
-                  key={current.id}
-                  movie={current}
-                  className="flex flex-1 flex-col justify-end gap-3 p-6"
-                >
-                  <h2 className="text-3xl font-bold leading-tight">{current.title}</h2>
-                  <p className="text-sm font-medium text-white/80">
-                    {current.year} · {current.genre} · {current.runtime}
-                  </p>
-                  <p className="text-sm text-white/70">{current.blurb}</p>
-                </PosterCard>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => vote(false)}
-                    className="flex items-center justify-center gap-2 rounded-2xl border border-neutral-700 bg-neutral-900 py-5 text-base font-semibold text-rose-300 active:scale-[0.98]"
-                  >
-                    <X className="size-6" />
-                    Nope
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => vote(true)}
-                    className="flex items-center justify-center gap-2 rounded-2xl border border-emerald-500/40 bg-emerald-500/15 py-5 text-base font-semibold text-emerald-300 active:scale-[0.98]"
-                  >
-                    <Heart className="size-6" />
-                    Yes
-                  </button>
-                </div>
-              </>
-            ) : (
-              <div className="flex flex-1 flex-col items-center justify-center gap-4 rounded-3xl border border-neutral-800 bg-neutral-900/60 p-8 text-center">
-                {theirVotes.length < deck.length ? (
-                  <>
-                    <Loader2 className="size-7 animate-spin text-fuchsia-400" />
-                    <p className="font-semibold">You&apos;re done — waiting on them</p>
-                    <p className="text-sm text-neutral-400">
-                      {deck.length - theirVotes.length} cards to go. A match pops up
-                      the moment you agree.
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <p className="text-3xl">😬</p>
-                    <p className="font-semibold">No overlap this time</p>
-                    <button
-                      type="button"
-                      onClick={startOver}
-                      className="flex items-center justify-center gap-2 rounded-2xl bg-fuchsia-600 px-5 py-3 font-semibold active:scale-[0.98]"
-                    >
-                      <RotateCcw className="size-4" />
-                      Reshuffle
-                    </button>
-                  </>
+        <div className="grid grid-cols-2 gap-3">
+          {room.movies.map(m => {
+            const isSelected = selectedIds.includes(m.id);
+            return (
+              <div 
+                key={m.id} 
+                onClick={() => toggleSelect(m.id, 3)}
+                className={`relative rounded-xl overflow-hidden border-2 cursor-pointer transition ${isSelected ? 'border-red-500 ring-2 ring-red-500/50' : 'border-neutral-800'}`}
+              >
+                <img src={m.poster_path} alt={m.title} className="w-full h-56 object-cover" />
+                {isSelected && (
+                  <div className="absolute inset-0 bg-red-950/70 flex items-center justify-center font-extrabold text-red-400 text-lg">
+                    VETOED
+                  </div>
                 )}
+                <div className="p-2 bg-neutral-900 text-xs truncate font-medium">{m.title}</div>
               </div>
-            )}
-          </section>
-        )}
-      </div>
-    </main>
-  );
+            );
+          })}
+        </div>
+
+        <footer className="fixed bottom-0 left-0 right-0 p-4 bg-neutral-950/90 backdrop-blur border-t border-neutral-800 max-w-md mx-auto">
+          <button 
+            disabled={selectedIds.length !== 3 || submitted}
+            onClick={() => submitAction('SUBMIT_VETO')}
+            className={`w-full py-3 rounded-xl font-bold transition ${submitted ? 'bg-neutral-800 text-neutral-500' : selectedIds.length === 3 ? 'bg-red-500 text-white' : 'bg-neutral-800 text-neutral-500'}`}
+          >
+            {submitted ? 'Waiting for partner...' : `Lock in 3 Vetoes (${selectedIds.length}/3)`}
+          </button>
+        </footer>
+      </main>
+    );
+  }
+
+  // 3. Phase 1: The Shortlist (Pick 2)
+  if (room.phase === 1) {
+    return (
+      <main className="min-h-screen bg-neutral-950 text-white p-4 max-w-md mx-auto pb-24">
+        <header className="text-center mb-6 pt-4">
+          <span className="text-xs uppercase tracking-widest text-emerald-400 font-mono">Shortlist</span>
+          <h2 className="text-2xl font-bold mt-1">Phase 2: Pick Two</h2>
+          <p className="text-sm text-neutral-400 mt-1">Secretly pick your top 2 favorites from the survivors.</p>
+        </header>
+
+        <div className="grid grid-cols-2 gap-3">
+          {room.survivingMovies.map(m => {
+            const isSelected = selectedIds.includes(m.id);
+            return (
+              <div 
+                key={m.id} 
+                onClick={() => toggleSelect(m.id, 2)}
+                className={`relative rounded-xl overflow-hidden border-2 cursor-pointer transition ${isSelected ? 'border-emerald-500 ring-2 ring-emerald-500/50' : 'border-neutral-800'}`}
+              >
+                <img src={m.poster_path} alt={m.title} className="w-full h-56 object-cover" />
+                {isSelected && (
+                  <div className="absolute inset-0 bg-emerald-950/70 flex items-center justify-center font-extrabold text-emerald-400 text-lg">
+                    PICKED ⭐
+                  </div>
+                )}
+                <div className="p-2 bg-neutral-900 text-xs truncate font-medium">{m.title}</div>
+              </div>
+            );
+          })}
+        </div>
+
+        <footer className="fixed bottom-0 left-0 right-0 p-4 bg-neutral-950/90 backdrop-blur border-t border-neutral-800 max-w-md mx-auto">
+          <button 
+            disabled={selectedIds.length !== 2 || submitted}
+            onClick={() => submitAction('SUBMIT_SHORTLIST')}
+            className={`w-full py-3 rounded-xl font-bold transition ${submitted ? 'bg-neutral-800 text-neutral-500' : selectedIds.length === 2 ? 'bg-emerald-500 text-black' : 'bg-neutral-800 text-neutral-500'}`}
+          >
+            {submitted ? 'Waiting for partner...' : `Lock in 2 Picks (${selectedIds.length}/2)`}
+          </button>
+        </footer>
+      </main>
+    );
+  }
+
+  // 4. Phase 2: The Final Reveal
+  if (room.phase === 2 && room.winner) {
+    return (
+      <main className="min-h-screen bg-neutral-950 text-white flex flex-col items-center justify-center p-6 text-center">
+        <div className="text-xs uppercase tracking-widest text-emerald-400 font-bold mb-2">Tonight's Match</div>
+        <div className="w-full max-w-xs rounded-2xl overflow-hidden border-2 border-emerald-500 shadow-2xl bg-neutral-900">
+          <img src={room.winner.poster_path} alt={room.winner.title} className="w-full h-96 object-cover" />
+          <div className="p-5 text-left">
+            <div className="flex justify-between items-baseline mb-2">
+              <h2 className="text-xl font-bold leading-snug">{room.winner.title}</h2>
+              <span className="text-xs text-neutral-400 ml-2">{room.winner.release_year}</span>
+            </div>
+            <p className="text-xs text-neutral-300 line-clamp-3 leading-relaxed">{room.winner.overview}</p>
+          </div>
+        </div>
+        <button 
+          onClick={() => setRoom(null)} 
+          className="mt-6 text-xs text-neutral-500 underline"
+        >
+          Start New Session
+        </button>
+      </main>
+    );
+  }
+
+  return null;
 }
