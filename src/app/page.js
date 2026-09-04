@@ -9,18 +9,25 @@ export default function Home() {
   const [submitted, setSubmitted] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // Poll room state every 2 seconds
+  // Poll room state every 2 seconds safely
   useEffect(() => {
     if (!room?.code) return;
     const interval = setInterval(async () => {
-      const res = await fetch(`/api/room?code=${room.code}`);
-      if (res.ok) {
-        const data = await res.json();
-        setRoom(data);
-        if (data.phase !== room.phase) {
-          setSelectedIds([]);
-          setSubmitted(false);
+      try {
+        const res = await fetch(`/api/room?code=${room.code}`);
+        if (res.ok) {
+          const text = await res.text();
+          if (text) {
+            const data = JSON.parse(text);
+            setRoom(data);
+            if (data.phase !== room.phase) {
+              setSelectedIds([]);
+              setSubmitted(false);
+            }
+          }
         }
+      } catch (err) {
+        console.error('Polling error:', err);
       }
     }, 2000);
     return () => clearInterval(interval);
@@ -28,29 +35,67 @@ export default function Home() {
 
   const createRoom = async () => {
     setLoading(true);
-    const res = await fetch('/api/room', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'CREATE' })
-    });
-    const data = await res.json();
-    setRoom(data);
-    setRole('host');
-    setLoading(false);
+    try {
+      const res = await fetch('/api/room', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'CREATE' })
+      });
+      
+      const text = await res.text(); 
+      
+      if (!res.ok) {
+        let errorMessage = text;
+        try {
+           const parsedErr = JSON.parse(text);
+           errorMessage = parsedErr.error || text;
+        } catch(e) {} 
+        
+        alert(`Failed (${res.status}): ${errorMessage || 'Empty response from server. Check your terminal.'}`);
+        setLoading(false);
+        return;
+      }
+
+      const data = text ? JSON.parse(text) : null;
+      if (!data) throw new Error("Server returned an empty success response.");
+
+      setRoom(data);
+      setRole('host');
+    } catch (err) {
+      console.error(err);
+      alert(`Error: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const joinRoom = async () => {
     if (!inputCode) return;
     setLoading(true);
-    const res = await fetch(`/api/room?code=${inputCode}`);
-    if (res.ok) {
-      const data = await res.json();
+    try {
+      const res = await fetch(`/api/room?code=${inputCode}`);
+      const text = await res.text();
+      
+      if (!res.ok) {
+        let errorMessage = text;
+        try {
+           const parsedErr = JSON.parse(text);
+           errorMessage = parsedErr.error || text;
+        } catch(e) {} 
+        alert(`Failed to join (${res.status}): ${errorMessage || 'Room not found.'}`);
+        setLoading(false);
+        return;
+      }
+
+      const data = text ? JSON.parse(text) : null;
       setRoom(data);
       setRole('guest');
-    } else {
-      alert('Room not found');
+    } catch (err) {
+      console.error(err);
+      alert(`Error joining room: ${err.message}`);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const toggleSelect = (id, max) => {
@@ -64,16 +109,22 @@ export default function Home() {
 
   const submitAction = async (actionType) => {
     setSubmitted(true);
-    await fetch('/api/room', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: actionType,
-        code: room.code,
-        role: role,
-        selections: selectedIds
-      })
-    });
+    try {
+      await fetch('/api/room', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: actionType,
+          code: room.code,
+          role: role,
+          selections: selectedIds
+        })
+      });
+    } catch (err) {
+      console.error(err);
+      setSubmitted(false);
+      alert('Failed to submit choices.');
+    }
   };
 
   // 1. Lobby View
@@ -95,12 +146,12 @@ export default function Home() {
               placeholder="Room Code" 
               value={inputCode} 
               onChange={e => setInputCode(e.target.value.toUpperCase())}
-              className="w-2/3 p-3 bg-neutral-900 border border-neutral-800 rounded-xl text-center font-mono uppercase"
+              className="w-2/3 p-3 bg-neutral-900 border border-neutral-800 rounded-xl text-center font-mono uppercase text-white"
             />
             <button 
               onClick={joinRoom}
               disabled={loading}
-              className="w-1/3 bg-neutral-800 hover:bg-neutral-700 rounded-xl font-bold transition"
+              className="w-1/3 bg-neutral-800 hover:bg-neutral-700 rounded-xl font-bold transition text-white"
             >
               Join
             </button>
