@@ -190,7 +190,82 @@ export function usePeerSync() {
     return true;
   }, []);
 
+  const connectAsGuest = useCallback(
+    async (code) => {
+      const Peer = await waitForPeerCtor();
+      const peer = new Peer();
+      peerRef.current = peer;
+
+      peer.on("open", () => {
+        safeSet(() => {
+          setRole("guest");
+          setRoomCode(code);
+        });
+        attachConnection(peer.connect(PEER_ID_PREFIX + code, { reliable: true }));
+      });
+
+      peer.on("error", (err) => {
+        safeSet(() => {
+          setError(
+            err?.type === "peer-unavailable"
+              ? "No room found with that code."
+              : err?.message || "Peer error"
+          );
+          setStatus("error");
+        });
+      });
+    },
+    [attachConnection, safeSet, waitForPeerCtor]
+  );
+
+  /** Fixed-room mode: first device in becomes host, the second auto-joins it. */
+  const enterRoom = useCallback(
+    async (code) => {
+      const normalized = normalizeCode(code);
+      if (!normalized) return;
+
+      setError(null);
+      setStatus("connecting");
+
+      const Peer = await waitForPeerCtor();
+      peerRef.current?.destroy();
+
+      const peer = new Peer(PEER_ID_PREFIX + normalized);
+      peerRef.current = peer;
+
+      peer.on("open", () => {
+        safeSet(() => {
+          setRole("host");
+          setRoomCode(normalized);
+          setStatus("hosting");
+        });
+      });
+
+      peer.on("connection", (conn) => {
+        if (connRef.current) {
+          conn.close();
+          return;
+        }
+        attachConnection(conn);
+      });
+
+      peer.on("error", (err) => {
+        if (err?.type === "unavailable-id") {
+          peer.destroy();
+          connectAsGuest(normalized);
+          return;
+        }
+        safeSet(() => {
+          setError(err?.message || "Peer error");
+          setStatus("error");
+        });
+      });
+    },
+    [attachConnection, connectAsGuest, safeSet, waitForPeerCtor]
+  );
+
   const clearMessages = useCallback(() => {
+
     setMessages([]);
     setLastMessage(null);
   }, []);
@@ -217,6 +292,7 @@ export function usePeerSync() {
     isConnected: status === "connected",
     host,
     join,
+    enterRoom,
     send,
     clearMessages,
     disconnect,

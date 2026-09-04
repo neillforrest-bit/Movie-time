@@ -1,9 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   Check,
-  Copy,
   Film,
   Heart,
   Loader2,
@@ -11,6 +10,7 @@ import {
   PartyPopper,
   RadioTower,
   RotateCcw,
+  Share2,
   Unplug,
   Wifi,
   X,
@@ -39,6 +39,7 @@ export default function Home() {
     isConnected,
     host,
     join,
+    enterRoom,
     send,
     clearMessages,
     disconnect,
@@ -47,6 +48,27 @@ export default function Home() {
   const [joinCode, setJoinCode] = useState("");
   const [copied, setCopied] = useState(false);
   const [roundStart, setRoundStart] = useState(0);
+
+  // ?r=CODE turns the app into a fixed room: no code to type, just tap the link.
+  const autoRoom = useSyncExternalStore(
+    () => () => {},
+    () => new URLSearchParams(window.location.search).get("r")?.toUpperCase() ?? null,
+    () => null
+  );
+  const enteredRef = useRef(false);
+  useEffect(() => {
+    if (!autoRoom || enteredRef.current) return;
+    enteredRef.current = true;
+    enterRoom(autoRoom);
+  }, [autoRoom, enterRoom]);
+
+  const origin = useSyncExternalStore(
+    () => () => {},
+    () => window.location.origin,
+    () => ""
+  );
+  const inviteUrl = origin && roomCode ? `${origin}/?r=${roomCode}` : "";
+
 
   const isBusy = status === "hosting" || status === "connecting";
   const deck = useMemo(() => (roomCode ? deckForRoom(roomCode) : []), [roomCode]);
@@ -81,8 +103,20 @@ export default function Home() {
     setRoundStart(at + 1);
   };
 
-  const copyCode = async () => {
-    await navigator.clipboard.writeText(roomCode);
+  const shareInvite = async () => {
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: "FlickSync",
+          text: "Let's pick a film — tap this and start swiping.",
+          url: inviteUrl,
+        });
+        return;
+      } catch {
+        // Share sheet dismissed; fall through to copying.
+      }
+    }
+    await navigator.clipboard.writeText(inviteUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -105,7 +139,37 @@ export default function Home() {
           ) : null}
         </header>
 
-        {!isConnected ? (
+        {!isConnected && autoRoom ? (
+          <section className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
+            {error ? (
+              <>
+                <p className="text-3xl">📡</p>
+                <p className="font-semibold">Couldn&apos;t connect</p>
+                <p className="text-sm text-neutral-400">{error}</p>
+                <button
+                  type="button"
+                  onClick={() => enterRoom(autoRoom)}
+                  className="flex items-center gap-2 rounded-2xl bg-fuchsia-600 px-5 py-3 font-semibold active:scale-[0.98]"
+                >
+                  <RotateCcw className="size-4" />
+                  Try again
+                </button>
+              </>
+            ) : (
+              <>
+                <Loader2 className="size-8 animate-spin text-fuchsia-400" />
+                <p className="font-semibold">
+                  {role === "host" ? "You're in — waiting for Jemma" : "Connecting you two…"}
+                </p>
+                <p className="text-sm text-neutral-400">
+                  {role === "host"
+                    ? "Swiping starts the moment she opens the link."
+                    : "One second."}
+                </p>
+              </>
+            )}
+          </section>
+        ) : !isConnected ? (
           <section className="flex flex-1 flex-col justify-center gap-5">
             <p className="text-center text-sm text-neutral-400">
               Two phones, one deck. You both swipe — the first film you both like
@@ -123,31 +187,40 @@ export default function Home() {
               ) : (
                 <RadioTower className="size-5" />
               )}
-              Host a room
+              Start a room
             </button>
 
             {role === "host" && roomCode ? (
-              <div className="flex flex-col gap-2 rounded-2xl border border-fuchsia-500/30 bg-fuchsia-500/10 p-4 text-center">
+              <div className="flex flex-col gap-3 rounded-2xl border border-fuchsia-500/30 bg-fuchsia-500/10 p-4 text-center">
                 <span className="text-xs uppercase tracking-widest text-fuchsia-300">
-                  Send this code to Jemma
+                  Room ready
                 </span>
-                <div className="flex items-center justify-center gap-3">
-                  <span className="font-mono text-3xl font-bold tracking-[0.3em]">
-                    {roomCode}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={copyCode}
-                    aria-label="Copy room code"
-                    className="rounded-lg border border-neutral-700 p-2 text-neutral-300"
-                  >
-                    {copied ? (
-                      <Check className="size-4 text-emerald-400" />
-                    ) : (
-                      <Copy className="size-4" />
-                    )}
-                  </button>
-                </div>
+                <span className="font-mono text-3xl font-bold tracking-[0.3em]">
+                  {roomCode}
+                </span>
+
+                <button
+                  type="button"
+                  onClick={shareInvite}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-white px-4 py-3.5 font-semibold text-neutral-900 active:scale-[0.98]"
+                >
+                  {copied ? (
+                    <>
+                      <Check className="size-5" />
+                      Link copied
+                    </>
+                  ) : (
+                    <>
+                      <Share2 className="size-5" />
+                      Send link to Jemma
+                    </>
+                  )}
+                </button>
+
+                <p className="break-all rounded-lg bg-neutral-950/50 px-3 py-2 text-[11px] text-neutral-400">
+                  {inviteUrl}
+                </p>
+
                 <span className="flex items-center justify-center gap-2 text-xs text-neutral-400">
                   <Loader2 className="size-3 animate-spin" />
                   Waiting for her to join…
